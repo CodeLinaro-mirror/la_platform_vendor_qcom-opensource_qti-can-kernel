@@ -2092,7 +2092,7 @@ static int qti_can_freeze(struct device *dev)
 	/* To disable checksum validation for qti-can probe response in restore */
 	checksum_enable = 0;
 
-	if (priv_data->time_sync_from_soc_to_mcu)
+	if (priv_data && priv_data->time_sync_from_soc_to_mcu)
 		del_timer(&priv_data->timer);
 	return ret;
 }
@@ -2164,19 +2164,21 @@ static int qti_can_restore(struct device *dev)
 	return 0;
 
 free_irq:
-	free_irq(spi->irq, priv_data);
-/* unregister_candev */
-	for (i = 0; i < priv_data->max_can_channels; i++)
-		unregister_candev(priv_data->netdev[i]);
-/* cleanup_candev */
-	if (priv_data) {
-		for (i = 0; i < priv_data->max_can_channels; i++) {
-			if (priv_data->netdev[i])
-				free_candev(priv_data->netdev[i]);
-		}
-		if (priv_data->tx_wq)
-			destroy_workqueue(priv_data->tx_wq);
+	if (spi) {
+		free_irq(spi->irq, priv_data);
 	}
+/* unregister_candev */
+	for (i = 0; i < priv_data->max_can_channels; i++) {
+		unregister_candev(priv_data->netdev[i]);
+	}
+/* cleanup_candev */
+	for (i = 0; i < priv_data->max_can_channels; i++) {
+		if (priv_data->netdev[i])
+			free_candev(priv_data->netdev[i]);
+	}
+	if (priv_data->tx_wq)
+		destroy_workqueue(priv_data->tx_wq);
+
 	return err;
 }
 
