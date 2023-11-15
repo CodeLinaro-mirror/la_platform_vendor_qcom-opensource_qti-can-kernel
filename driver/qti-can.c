@@ -2113,7 +2113,6 @@ static int qti_can_restore(struct device *dev)
 
 	if (spi) {
 		priv_data = spi_get_drvdata(spi);
-		disable_irq_wake(spi->irq);
 	} else {
 		ret = -1;
 	}
