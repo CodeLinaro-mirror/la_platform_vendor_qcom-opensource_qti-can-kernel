@@ -2106,7 +2106,7 @@ static int qti_can_thaw(struct device *dev)
 
 static int qti_can_restore(struct device *dev)
 {
-	int err, retry = 0, query_err = -1, ret = 0, i;
+	int err, retry = 0, query_err = -1, ret = 0;
 	struct can_filter_req *filter_request;
 	struct spi_device *spi = to_spi_device(dev);
 	struct qti_can *priv_data = NULL;
@@ -2127,9 +2127,9 @@ static int qti_can_restore(struct device *dev)
 	}
 	dev_info(dev, "Retry count for fw version query is %d\n", retry);
 	if (query_err) {
-		dev_err(&priv_data->spidev->dev, "QTI CAN probe failed\n");
+		dev_err(&priv_data->spidev->dev, "QTI CAN fw query failed\n");
 		err = -ENODEV;
-		goto free_irq;
+		return err;
 	}
 
 	if (priv_data->time_sync_from_soc_to_mcu) {
@@ -2160,25 +2160,8 @@ static int qti_can_restore(struct device *dev)
 		priv_data->univ_acc_filter_flag = false;
 		kfree(filter_request);
 	}
+
 	return 0;
-
-free_irq:
-	if (spi) {
-		free_irq(spi->irq, priv_data);
-	}
-/* unregister_candev */
-	for (i = 0; i < priv_data->max_can_channels; i++) {
-		unregister_candev(priv_data->netdev[i]);
-	}
-/* cleanup_candev */
-	for (i = 0; i < priv_data->max_can_channels; i++) {
-		if (priv_data->netdev[i])
-			free_candev(priv_data->netdev[i]);
-	}
-	if (priv_data->tx_wq)
-		destroy_workqueue(priv_data->tx_wq);
-
-	return err;
 }
 
 static int qti_can_suspend(struct device *dev)
