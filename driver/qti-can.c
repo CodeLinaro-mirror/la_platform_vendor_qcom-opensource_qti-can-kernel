@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 /* Copyright (c) 2015-2021, The Linux Foundation. All rights reserved. */
-/* Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved. */
+/* Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved. */
 
 #include <linux/interrupt.h>
 #include <linux/module.h>
@@ -2188,15 +2188,10 @@ static int qti_can_resume(struct device *dev)
 
 	if (spi) {
 		priv_data = spi_get_drvdata(spi);
-
 		if (priv_data && priv_data->time_sync_from_soc_to_mcu) {
 			disable_irq_wake(spi->irq);
 			qti_can_rx_message(priv_data);
 		}
-		else {
-			ret = -1;
-		}
-
 	} else {
 		ret = -1;
 	}
