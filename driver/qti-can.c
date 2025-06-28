@@ -2145,24 +2145,22 @@ static int qti_can_restore(struct device *dev)
 			err = -ENODEV;
 		}
 
+		if (priv_data->univ_acc_filter_flag) {
+			filter_request = kzalloc(sizeof(*filter_request), GFP_KERNEL);
+			if (!filter_request)
+				return -ENOMEM;
+
+			filter_request->can_if = 0;
+			filter_request->mid = 0;
+			filter_request->mask = 0x40000000;
+			qti_can_add_filter(dev, filter_request);
+
+			dev_info(dev, "universal acceptance filter added! %d\n", retry);
+
+			priv_data->univ_acc_filter_flag = false;
+			kfree(filter_request);
+		}
 	}
-
-	if (priv_data->univ_acc_filter_flag) {
-		filter_request = kzalloc(sizeof(*filter_request), GFP_KERNEL);
-		if (!filter_request)
-			return -ENOMEM;
-
-		filter_request->can_if = 0;
-		filter_request->mid = 0;
-		filter_request->mask = 0x40000000;
-		qti_can_add_filter(dev, filter_request);
-
-		dev_info(dev, "universal acceptance filter added! %d\n", retry);
-
-		priv_data->univ_acc_filter_flag = false;
-		kfree(filter_request);
-	}
-
 	return 0;
 }
 
