@@ -2253,6 +2253,10 @@ static void qti_can_remove(struct spi_device *spi)
 		unregister_candev(priv_data->netdev[i]);
 		free_candev(priv_data->netdev[i]);
 	}
+	if (priv_data->timer_thread) {
+                kthread_stop(priv_data->timer_thread);
+		priv_data->timer_thread = NULL;
+	}
 	destroy_workqueue(priv_data->tx_wq);
 }
 
