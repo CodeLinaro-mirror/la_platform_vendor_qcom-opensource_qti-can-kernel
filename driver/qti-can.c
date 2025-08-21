@@ -21,6 +21,7 @@
 #include <asm/div64.h>
 #include <linux/suspend.h>
 #include <linux/pm_runtime.h>
+#include <linux/io.h>
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/kthread.h>
@@ -50,6 +51,12 @@
 #define CALYPSO_MAX_CAN_CLK_FREQ	40000000 /* 40MHz */
 #define TIME_REQUEST_PERIOD         (60000) /* 60 Seconds */
 
+#ifdef TELEMATICS_TARGET
+#define PTP_REG_BASE			0x23047008
+#define MAC_STNSR_TSSS_LPOS 0
+#define MAC_STNSR_TSSS_HPOS 30
+#endif
+
 static int static_pos_checksum_en;
 static int dynamic_pos_checksum_en;
 static int checksum_enable;
@@ -77,6 +84,7 @@ struct qti_can {
 	int bits_per_word;
 	int reset_delay_msec;
 	int reset;
+	u32 ts_conf;
 	bool support_can_fd;
 	bool use_qtimer;
 	bool can_fw_cmd_timeout_req;
@@ -155,6 +163,10 @@ struct spi_miso { /* TLV for MISO line */
 #define IOCTL_BOOT_ROM_UPGRADE_DATA	(SIOCDEVPRIVATE + 12)
 #define IOCTL_END_BOOT_ROM_UPGRADE	(SIOCDEVPRIVATE + 13)
 #define IOCTL_END_FW_UPDATE_FILE	(SIOCDEVPRIVATE + 14)
+
+#ifdef TELEMATICS_TARGET
+#define IOCTL_TIMESTAMP_CONF		(SIOCDEVPRIVATE + 15)
+#endif
 
 #define IFR_DATA_OFFSET		0x100
 struct can_fw_resp {
@@ -298,6 +310,35 @@ struct qti_can_ioctl_req {
 
 static int qti_can_rx_message(struct qti_can *priv_data);
 
+#ifdef TELEMATICS_TARGET
+void __iomem *ptp_base_addr;
+
+u64 getValue(u64 data, u8 lbit, u8 hbit)
+{
+	return (((data) >> (lbit)) & (~(~0 << ((hbit) - (lbit) + 1))));
+}
+
+u64 qti_can_get_ptp_time(struct qti_can *priv_data)
+{
+	u64  ret = 0;
+	u64  gptp_time_sec_pre, gptp_time_ns, gptp_time_sec_cur;
+
+	/* Reading PTP time in nSec from register */
+	while (1) {
+		gptp_time_sec_pre = readl(ptp_base_addr);
+		gptp_time_ns = readl(ptp_base_addr + sizeof(uint32_t));
+		gptp_time_sec_cur = readl(ptp_base_addr);
+		if (gptp_time_sec_cur == gptp_time_sec_pre)
+			break;
+	}
+	ret = getValue(gptp_time_ns, MAC_STNSR_TSSS_LPOS, MAC_STNSR_TSSS_HPOS);
+	ret = ret + (gptp_time_sec_cur * 1000000000ull);
+	dev_dbg(&priv_data->spidev->dev, "%s: %llu\r\n", __func__, ret);
+
+	return ret;
+}
+#endif
+
 static irqreturn_t qti_can_irq(int irq, void *priv)
 {
 	struct qti_can *priv_data = priv;
@@ -345,6 +386,10 @@ static void qti_canfd_receive_frame(struct qti_can *priv_data,
 	s64 ts_offset_corrected;
 	static u16 buff_frames_disc_cntr;
 	static u8 disp_disc_cntr = 1;
+#ifdef TELEMATICS_TARGET
+	u64 mstime;
+	s64 system_ts_ns;
+#endif
 
 	dev = &priv_data->spidev->dev;
 	if (frame->can_if >= priv_data->max_can_channels) {
@@ -384,6 +429,58 @@ static void qti_canfd_receive_frame(struct qti_can *priv_data,
 		}
 
 		nsec = ms_to_ktime(ts_offset_corrected);
+#ifdef TELEMATICS_TARGET
+		if (priv_data->use_qtimer)
+			system_ts_ns = qtimer_time();
+		else
+			system_ts_ns = ktime_to_ns(ktime_get_boottime());
+
+		if (priv_data->ts_conf == 0) {
+			nsec = ms_to_ktime(frame->ts);
+		} else {
+			if (priv_data->time_diff == 0) {
+				if (priv_data->ts_conf == 1) {
+					if (priv_data->use_qtimer)
+						mstime = div_u64(qtimer_time(), NSEC_PER_MSEC);
+					else
+						mstime = ktime_to_ms(ktime_get_boottime());
+					dev_err(&priv_data->spidev->dev,
+						"time-diff 0: system time: %lld\n", mstime);
+				} else if (priv_data->ts_conf == 2) {
+					/* PTP time is in nano second.*/
+					/* Need to convert it in millisecond*/
+					mstime = div_u64(qti_can_get_ptp_time(priv_data), 1000000);
+				} else {
+					dev_err(&priv_data->spidev->dev,
+						"Incorrect timestamp source\n");
+					mstime = 0;
+				}
+				priv_data->time_diff = mstime - (le64_to_cpu(frame->ts));
+				ts_offset_corrected = le64_to_cpu(frame->ts)
+						+ priv_data->time_diff;
+				dev_err(&priv_data->spidev->dev,
+					"time-diff 0: ts_offset_corrected : %lld\n",
+					ts_offset_corrected);
+			}
+
+			if (priv_data->ts_conf == 1) {
+				if (nsec > system_ts_ns) {
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds sys-time \r\n");
+					priv_data->time_diff = ktime_to_ms(system_ts_ns)
+						- (le64_to_cpu(frame->ts));
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds system time: %lld\n", mstime);
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds MCU time: %lld\n",
+						le64_to_cpu(frame->ts));
+					ts_offset_corrected = le64_to_cpu(frame->ts)
+						+ priv_data->time_diff;
+				}
+			}
+			nsec = ms_to_ktime(ts_offset_corrected);
+		}
+#endif
 		skt = skb_hwtstamps(skb);
 		skt->hwtstamp = nsec;
 		skb->tstamp = nsec;
@@ -411,6 +508,10 @@ static void qti_can_receive_frame(struct qti_can *priv_data,
 	s64 ts_offset_corrected;
 	static u16 buff_frames_disc_cntr;
 	static u8 disp_disc_cntr = 1;
+#ifdef TELEMATICS_TARGET
+	u64 mstime;
+	s64 system_ts_ns;
+#endif
 
 	dev = &priv_data->spidev->dev;
 	if (frame->can_if >= priv_data->max_can_channels) {
@@ -448,8 +549,59 @@ static void qti_can_receive_frame(struct qti_can *priv_data,
 				 buff_frames_disc_cntr);
 			disp_disc_cntr = 0;
 		}
-
 		nsec = ms_to_ktime(ts_offset_corrected);
+#ifdef TELEMATICS_TARGET
+		if (priv_data->use_qtimer)
+			system_ts_ns = qtimer_time();
+		else
+			system_ts_ns = ktime_to_ns(ktime_get_boottime());
+		if (priv_data->ts_conf == 0) {
+			nsec = ms_to_ktime(frame->ts);
+		} else {
+			if (priv_data->time_diff == 0) {
+				if (priv_data->ts_conf == 1) {
+					if (priv_data->use_qtimer)
+						mstime = div_u64(qtimer_time(), NSEC_PER_MSEC);
+					else
+						mstime = ktime_to_ms(ktime_get_boottime());
+					dev_err(&priv_data->spidev->dev,
+						"time-diff 0: system time: %lld\n", mstime);
+				} else if (priv_data->ts_conf == 2) {
+					/* PTP time is in nano second.*/
+					/* Need to convert it in millisecond*/
+					mstime = div_u64(qti_can_get_ptp_time(priv_data), 1000000);
+				} else {
+					dev_err(&priv_data->spidev->dev,
+						"Incorrect timestamp source\n");
+					mstime = 0;
+				}
+				priv_data->time_diff = mstime - (le64_to_cpu(frame->ts));
+				ts_offset_corrected = le64_to_cpu(frame->ts)
+						+ priv_data->time_diff;
+				dev_err(&priv_data->spidev->dev,
+					"time-diff 0: ts_offset_corrected : %lld\n",
+					ts_offset_corrected);
+			}
+
+			if (priv_data->ts_conf == 1) {
+				if (nsec > system_ts_ns) {
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds sys-time \r\n");
+					priv_data->time_diff = ktime_to_ms(system_ts_ns)
+						- (le64_to_cpu(frame->ts));
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds system time: %lld\n", mstime);
+					dev_dbg(&priv_data->spidev->dev,
+						"CAN time exceeds MCU time: %lld\n",
+						le64_to_cpu(frame->ts));
+					ts_offset_corrected = le64_to_cpu(frame->ts)
+						+ priv_data->time_diff;
+				}
+			}
+			nsec = ms_to_ktime(ts_offset_corrected);
+		}
+#endif
+
 		skt = skb_hwtstamps(skb);
 		skt->hwtstamp = nsec;
 		skb->tstamp = nsec;
@@ -511,9 +663,11 @@ static int qti_can_process_response(struct qti_can *priv_data,
 	u64 mstime;
 	static s64 prev_time_diff;
 	static u8 first_offset_est = 1;
-	s64 offset_variation = 0;
-	static u8 offset_print_cntr;
 	struct canfd_receive_frame *frame;
+#ifndef TELEMATICS_TARGET
+	static u8 offset_print_cntr;
+	s64 offset_variation = 0;
+#endif
 
 	dev_dbg(&priv_data->spidev->dev, "<%x %2d [%d]\n", resp->cmd, resp->len, resp->seq);
 	if (resp->cmd == CMD_CAN_RECEIVE_FRAME) {
@@ -621,6 +775,30 @@ static int qti_can_process_response(struct qti_can *priv_data,
 		ret |= (fw_resp->min & 0xF) << 4;
 		ret |= (fw_resp->sub_min & 0xF);
 	} else if (resp->cmd == CMD_UPDATE_TIME_INFO) {
+#ifdef TELEMATICS_TARGET
+		if (priv_data->ts_conf != 0) {
+			struct can_time_info *time_data = (struct can_time_info *)resp->data;
+			if (priv_data->ts_conf == 1) {
+				if (priv_data->use_qtimer)
+					mstime = div_u64(qtimer_time(), NSEC_PER_MSEC);
+				else
+					mstime = ktime_to_ms(ktime_get_boottime());
+			} else if (priv_data->ts_conf == 2) {
+				/* PTP time is in nano second.*/
+				/* Need to convert it in millisecond*/
+				mstime = div_u64(qti_can_get_ptp_time(priv_data), 1000000uL);
+			} else {
+				dev_info(&priv_data->spidev->dev, "Incorrect timestamp source\n");
+				mstime = 0;
+			}
+			priv_data->time_diff = mstime - (le64_to_cpu(time_data->time));
+
+			if (first_offset_est == 1) {
+				prev_time_diff = priv_data->time_diff;
+				first_offset_est = 0;
+			}
+		}
+#else
 		struct can_time_info *time_data =
 			(struct can_time_info *)resp->data;
 		priv_data->cmd_result = 0;
@@ -660,6 +838,7 @@ static int qti_can_process_response(struct qti_can *priv_data,
 			/* variation is within threshold */
 			prev_time_diff = priv_data->time_diff;
 		}
+#endif
 	}
 
 exit:
@@ -1604,6 +1783,9 @@ static int qti_can_netdev_do_ioctl(struct net_device *netdev,
 	u64 mode;
 	int ret = -EINVAL;
 	struct spi_device *spi;
+#ifdef TELEMATICS_TARGET
+	u32 ts_conf;
+#endif
 
 	netdev_priv_data = netdev_priv(netdev);
 	priv_data = netdev_priv_data->qti_can;
@@ -1660,6 +1842,24 @@ static int qti_can_netdev_do_ioctl(struct net_device *netdev,
 	case IOCTL_END_FW_UPDATE_FILE:
 		ret = qti_can_do_blocking_ioctl(netdev, ifr, cmd, data);
 		break;
+#ifdef TELEMATICS_TARGET
+	case IOCTL_TIMESTAMP_CONF:
+		if (!ifr)
+			return -EINVAL;
+		if (!data)
+			return -EINVAL;
+
+		mutex_lock(&priv_data->spi_lock);
+		if (copy_from_user(&ts_conf, data, sizeof(u32))) {
+			mutex_unlock(&priv_data->spi_lock);
+			return -EFAULT;
+		}
+		priv_data->ts_conf = ts_conf;
+		dev_info(&priv_data->spidev->dev, "timestamp Configuration %d\n",
+			 priv_data->ts_conf);
+		mutex_unlock(&priv_data->spi_lock);
+		break;
+#endif
 	}
 	dev_dbg(&priv_data->spidev->dev, "%s ret %d\n", __func__, ret);
 
@@ -1924,6 +2124,19 @@ static int qti_can_probe(struct spi_device *spi)
 
 	priv_data->reset = of_get_named_gpio(spi->dev.of_node,
 					     "qcom,reset-gpio", 0);
+#ifdef TELEMATICS_TARGET
+	err = of_property_read_u32(spi->dev.of_node,
+				   "qcom,timestamp-conf", &priv_data->ts_conf);
+	if (err)
+		priv_data->ts_conf = 0;
+
+	dev_info(&priv_data->spidev->dev, "Time stamp Configuration: %d\n",
+		 priv_data->ts_conf);
+
+	ptp_base_addr = devm_ioremap(&spi->dev,PTP_REG_BASE, sizeof(uint64_t));
+	if (!ptp_base_addr)
+		dev_err(&priv_data->spidev->dev, "devm_ioremap for qti-can PTP failed\r\n");
+#endif
 
 	if (of_get_property(spi->dev.of_node, "gpio-activelow", NULL))
 		priv_data->active_low = true; /* Active_Low */
@@ -2040,6 +2253,10 @@ static void qti_can_remove(struct spi_device *spi)
 		unregister_candev(priv_data->netdev[i]);
 		free_candev(priv_data->netdev[i]);
 	}
+	if (priv_data->timer_thread) {
+                kthread_stop(priv_data->timer_thread);
+		priv_data->timer_thread = NULL;
+	}
 	destroy_workqueue(priv_data->tx_wq);
 }
 
@@ -2052,7 +2269,6 @@ static void qti_can_shutdown(struct spi_device *spi)
 	priv_data->wake_irq_en = true;
 	if (priv_data->timer_thread)
 		kthread_stop(priv_data->timer_thread);
-
 }
 
 static int qti_can_add_filter(struct device *dev, struct can_filter_req *filter_request)
