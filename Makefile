@@ -2,6 +2,11 @@
 ifeq ($(TARGET_SUPPORT), sa510m)
 M=$(PWD)
 endif
+
+ifeq ($(TARGET_SUPPORT), sa535m)
+M=$(PWD)
+endif
+
 KBUILD_OPTIONS += QTI_CAN_KERNEL_ROOT=$(shell pwd)
 KBUILD_OPTIONS += KERNEL_ROOT=$(ROOT_DIR)/$(KERNEL_DIR)
 KBUILD_OPTIONS += MODNAME=qti-can
