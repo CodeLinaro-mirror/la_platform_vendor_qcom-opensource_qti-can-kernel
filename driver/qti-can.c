@@ -88,6 +88,7 @@ struct qti_can {
 	bool univ_acc_filter_flag;
 	bool probe_query_resp;
 	bool time_sync_from_soc_to_mcu;
+	bool wake_irq_en;
 };
 
 struct qti_can_netdev_privdata {
@@ -299,7 +300,12 @@ static irqreturn_t qti_can_irq(int irq, void *priv)
 {
 	struct qti_can *priv_data = priv;
 
-	qti_can_rx_message(priv_data);
+
+	if (!priv_data->wake_irq_en) {
+		qti_can_rx_message(priv_data);
+	} else {
+		dev_dbg(&priv_data->spidev->dev, "qti_can wake_irq Invoked upon Resume\r\n");
+	}
 	return IRQ_HANDLED;
 }
 
@@ -907,7 +913,9 @@ static int qti_can_do_spi_transaction(struct qti_can *priv_data)
 	xfer->rx_buf = priv_data->rx_buf;
 	xfer->len = priv_data->xfer_length;
 	xfer->bits_per_word = priv_data->bits_per_word;
-	ret = spi_sync(spi, msg);
+	/*wake_irq_en check added to disable SPI transfer in the event of shutdown/reboot only*/
+	if (!priv_data->wake_irq_en)
+		ret = spi_sync(spi, msg);
 	dev_dbg(&priv_data->spidev->dev, "spi_sync ret %d\n", ret);
 	for (rx_buf_idx = 0; rx_buf_idx < 6; rx_buf_idx++) {
 		idx = 10 * rx_buf_idx;
@@ -2012,6 +2020,10 @@ static int qti_can_probe(struct spi_device *spi)
 		err = -ENODEV;
 		goto free_irq;
 	}
+
+	/* Initializing wake_irq_en with false to recive SPI data on IRQ */
+	priv_data->wake_irq_en = false;
+
 	return 0;
 
 free_irq:
@@ -2091,7 +2103,7 @@ static int qti_can_freeze(struct device *dev)
 		priv_data = spi_get_drvdata(spi);
 	/* To disable checksum validation for qti-can probe response in restore */
 	checksum_enable = 0;
-
+	priv_data->wake_irq_en = true;
 	if (priv_data && priv_data->time_sync_from_soc_to_mcu)
 		del_timer(&priv_data->timer);
 	return ret;
@@ -2116,7 +2128,7 @@ static int qti_can_restore(struct device *dev)
 	} else {
 		ret = -1;
 	}
-
+	priv_data->wake_irq_en = false;
 	priv_data->probe_query_resp = false;
 	while ((query_err != 0) && (retry < QTI_CAN_FW_QUERY_RETRY_COUNT) &&
 	       (!(priv_data->probe_query_resp))) {
@@ -2172,8 +2184,10 @@ static int qti_can_suspend(struct device *dev)
 
 	if (spi) {
 		priv_data = spi_get_drvdata(spi);
-		if (priv_data && priv_data->time_sync_from_soc_to_mcu)
+		if (priv_data && priv_data->time_sync_from_soc_to_mcu) {
 			enable_irq_wake(spi->irq);
+			priv_data->wake_irq_en = true;
+		}
 	} else {
 		ret = -1;
 	}
@@ -2189,6 +2203,7 @@ static int qti_can_resume(struct device *dev)
 	if (spi) {
 		priv_data = spi_get_drvdata(spi);
 		if (priv_data && priv_data->time_sync_from_soc_to_mcu) {
+			priv_data->wake_irq_en = false;
 			disable_irq_wake(spi->irq);
 			qti_can_rx_message(priv_data);
 		}
