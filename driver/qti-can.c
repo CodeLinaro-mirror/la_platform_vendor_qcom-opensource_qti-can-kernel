@@ -1976,6 +1976,12 @@ cleanup_privdata:
 	return NULL;
 }
 
+static const struct spi_device_id qti_can_spi_ids[] = {
+	{ "nxp,mpc5746c", 0},
+	{ "renesas,rh850", 0},
+	{  }
+};
+
 static const struct of_device_id qti_can_match_table[] = {
 	{ .compatible = "qcom,renesas,rh850" },
 	{ .compatible = "qcom,nxp,mpc5746c" },
@@ -2253,6 +2259,10 @@ static void qti_can_remove(struct spi_device *spi)
 		unregister_candev(priv_data->netdev[i]);
 		free_candev(priv_data->netdev[i]);
 	}
+	if (priv_data->timer_thread) {
+                kthread_stop(priv_data->timer_thread);
+		priv_data->timer_thread = NULL;
+	}
 	destroy_workqueue(priv_data->tx_wq);
 }
 
@@ -2437,6 +2447,7 @@ static struct spi_driver qti_can_driver = {
 	.probe = qti_can_probe,
 	.remove = qti_can_remove,
 	.shutdown = qti_can_shutdown,
+	.id_table = qti_can_spi_ids,
 };
 module_spi_driver(qti_can_driver);
 
