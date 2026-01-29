@@ -27,6 +27,7 @@
 #include <linux/tty_driver.h>
 #include <linux/version.h>
 #include <linux/kdev_t.h>
+#include <linux/namei.h>
 
 #define MAX_TX_BUFFERS			1
 #define XFER_BUFFER_SIZE		64
@@ -52,6 +53,7 @@
 #define CAN_STANDARD_PACKET_SIZE	22
 #define MAX_CAN_CLK_FREQ	40000000 /* 40MHz */
 #define TIME_REQUEST_PERIOD         (30000) /* 30 Seconds */
+#define UART_DEVICE_NODE_PATH 		"/dev/ttyHS1"
 
 /* Module parameters */
 static char *uart_can_tty_name = "ttyHS1";
@@ -697,14 +699,12 @@ static void uart_can_rx(struct tty_struct *tty, const unsigned char *cp,
 {
 	struct uart_can *priv_data = (struct uart_can *)tty->disc_data;
 
- 	pr_info("can_uart: rx invoked with count: %d!!\n", count); 
+ 	pr_info("can_uart: rx invoked with count: %d!!\n", count);
 
 	if (unlikely(count > XFER_BUFFER_SIZE))
 		count = XFER_BUFFER_SIZE;
 
 	memcpy(priv_data->rx_buf, cp, count);
- 	pr_info("can_uart: %x %x %x %x %x %x %x %x\n", priv_data->rx_buf[0], priv_data->rx_buf[1], priv_data->rx_buf[2], priv_data->rx_buf[3], 
-											priv_data->rx_buf[4], priv_data->rx_buf[5], priv_data->rx_buf[6], priv_data->rx_buf[7]); 
 
 	priv_data->xfer_length = count;
 	uart_can_process_rx(priv_data, priv_data->rx_buf);
@@ -756,9 +756,18 @@ static int __init uart_can_init(void)
 {
  	int status = 0;
 	dev_t tty_device;
-	int ret = 0;
+	struct path path;
 
 	pr_info("can_uart: CAN over UART driver\n");
+	/*To check weather ttyHS1 node is present or not */
+	status = kern_path(UART_DEVICE_NODE_PATH, LOOKUP_FOLLOW, &path);
+	if (status) {
+		pr_info("can_uart : %s device node not present\n",UART_DEVICE_NODE_PATH);
+		return -ENODEV;
+	}
+
+	/*Drop if ttyHS1 node is aquired*/
+	path_put(&path);
 
 	status = tty_register_ldisc( N_CAN_UART, &uart_can_ldisc);
 	if (status) {
@@ -769,36 +778,36 @@ static int __init uart_can_init(void)
 
 	if(uart_can_tty_name != NULL) {
 		status = tty_dev_name_to_number(uart_can_tty_name, &tty_device);
-		pr_info("can_uart: 0x%x is dev_t & ret is %d\n", tty_device, ret);
+		pr_info("can_uart: 0x%x is dev_t & status is %d\n", tty_device, status);
 		if(status) {
-			pr_err("can_uart: Invalid tty name %s  ret = %d",uart_can_tty_name,status);
+			pr_err("can_uart: Invalid tty name %s  status = %d",uart_can_tty_name,status);
 			tty_unregister_ldisc( N_CAN_UART);
-			return -EINVAL;
+			return -ENODEV;
 		}
 		tty_tst = tty_kopen(tty_device);
 		if(IS_ERR(tty_tst)) {
 			status = PTR_ERR(tty_tst);
-			pr_err("can_uart: failed to open tty (ret=%d)",status);
+			pr_err("can_uart: failed to open tty (status=%d)",status);
 			tty_unregister_ldisc( N_CAN_UART);
 			return status;
 		}
 
 		pr_info("can_uart: device opened name: %s, major: %d, minor_start: %d & num: %d\n",
-			tty_tst->name, tty_tst->driver->major, tty_tst->driver->minor_start, 
+			tty_tst->name, tty_tst->driver->major, tty_tst->driver->minor_start,
 			tty_tst->driver->num);
 		if(tty_tst->ops->open)
-			ret = tty_tst->ops->open(tty_tst, NULL);
-		pr_info("can_uart: tty->ops->open invoked! with ret %d\n", ret);
+			status = tty_tst->ops->open(tty_tst, NULL);
+		pr_info("can_uart: tty->ops->open invoked! with status %d\n", status);
 
 		tty_unlock(tty_tst);
-		ret = tty_set_ldisc(tty_tst, N_CAN_UART);
-		if (!ret) {
+		status = tty_set_ldisc(tty_tst, N_CAN_UART);
+		if (!status) {
 			pr_info("can_uart: tty_set_ldisc succeeded\n");
-			ret = tty_set_termios(tty_tst, &tty_tst_termios);
-			pr_info("can_uart: tty_set_termios returned %d\n", ret);
+			status = tty_set_termios(tty_tst, &tty_tst_termios);
+			pr_info("can_uart: tty_set_termios returned %d\n", status);
 			return status;
 		} else {
-			pr_err("can_uart: tty_set_ldisc failed with %d\n", ret);
+			pr_err("can_uart: tty_set_ldisc failed with %d\n", status);
 		}
 		tty_lock(tty_tst);
 		if(tty_tst->ops->close)
