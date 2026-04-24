@@ -25,6 +25,7 @@
 #include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/kthread.h>
+#include <linux/version.h>
 
 #define MAX_TX_BUFFERS			1
 #define XFER_BUFFER_SIZE		64
@@ -1909,8 +1910,13 @@ static int qti_can_create_netdev(struct spi_device *spi,
 	if (priv_data->support_can_fd)
 		netdev_priv_data->can.ctrlmode_supported |= CAN_CTRLMODE_FD;
 	netdev_priv_data->can.bittiming_const = &qti_can_bittiming_const;
-	netdev_priv_data->can.data_bittiming_const =
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0))
+	netdev_priv_data->can.bittiming_const =
 						&qti_can_data_bittiming_const;
+#else
+	netdev_priv_data->can.data_bittiming_const =
+                                                &qti_can_data_bittiming_const;
+#endif
 	netdev_priv_data->can.clock.freq = priv_data->clk_freq_mhz;
 	netdev_priv_data->can.do_set_bittiming = qti_can_set_bitrate;
 
